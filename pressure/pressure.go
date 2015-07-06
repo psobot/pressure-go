@@ -247,11 +247,15 @@ func (pq *PressureQueue) put(conn redis.Conn, buf []byte) (e error) {
 	return nil
 }
 
-func (pq *PressureQueue) Get() (result []byte, e error) {
-	return pq.get(pq.Connection)
+func (pq *PressureQueue) GetNonExclusively() (result []byte, e error) {
+	return pq.get(pq.Connection, false)
 }
 
-func (pq *PressureQueue) get(conn redis.Conn) (result []byte, e error) {
+func (pq *PressureQueue) Get() (result []byte, e error) {
+	return pq.get(pq.Connection, true)
+}
+
+func (pq *PressureQueue) get(conn redis.Conn, exclusiveConsumer bool) (result []byte, e error) {
 	exists, err := redis.Bool(conn.Do("EXISTS", pq.keys.bound))
 
 	if err != nil {
@@ -264,17 +268,19 @@ func (pq *PressureQueue) get(conn redis.Conn) (result []byte, e error) {
 		return nil, ErrQueueDoesNotExist
 	}
 
-	_, err = conn.Do("BRPOP", pq.keys.consumerFree, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	defer func() {
-		_, err = conn.Do("LPUSH", pq.keys.consumerFree, 0)
+	if exclusiveConsumer {
+		_, err = conn.Do("BRPOP", pq.keys.consumerFree, 0)
 		if err != nil {
-			e = err
+			return nil, err
 		}
-	}()
+
+		defer func() {
+			_, err = conn.Do("LPUSH", pq.keys.consumerFree, 0)
+			if err != nil {
+				e = err
+			}
+		}()
+	}
 
 	_, err = conn.Do("SET", pq.keys.consumer, pq.clientUid)
 	if err != nil {
@@ -537,7 +543,7 @@ func (pq *PressureQueue) getIntoChan(c chan []byte) {
 	defer threadLocalConnection.Close()
 
 	for {
-		data, err := pq.get(threadLocalConnection)
+		data, err := pq.get(threadLocalConnection, true)
 		if err == nil {
 			c <- data
 		} else if err == ErrQueueIsClosed {
